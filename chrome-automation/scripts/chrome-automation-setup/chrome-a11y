@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+"""
+Chrome Accessibility Controller (chrome-a11y)
+
+Control Chrome using AT-SPI (Assistive Technology Service Provider Interface).
+This works when xdotool clicks fail due to Chrome's compositor.
+
+Usage:
+    chrome-a11y click "Button Name"     # Click element by name
+    chrome-a11y list [filter]           # List clickable elements
+    chrome-a11y list-all [filter]       # List all elements
+    chrome-a11y type "text"             # Type text (uses xdotool)
+    chrome-a11y key "ctrl+l"            # Send key combination
+    chrome-a11y focus "element"         # Focus an element
+    chrome-a11y screenshot [file]       # Take screenshot
+    chrome-a11y navigate "url"          # Navigate to URL
+    chrome-a11y tab [number]            # Switch to tab number
+"""
+
+import sys
+import os
+import subprocess
+import time
+
+# Set up environment
+os.environ.setdefault('DISPLAY', ':1')
+os.environ['GTK_MODULES'] = 'gail:atk-bridge'
+os.environ['NO_AT_BRIDGE'] = '0'
+os.environ['GNOME_ACCESSIBILITY'] = '1'
+
+import gi
+gi.require_version('Atspi', '2.0')
+from gi.repository import Atspi
+
+# Initialize AT-SPI
+Atspi.init()
+
+
+class ChromeController:
+    """Control Chrome via AT-SPI accessibility interface."""
+
+    CLICKABLE_ROLES = [
+        'push button', 'link', 'menu item', 'check box',
+        'radio button', 'toggle button', 'combo box',
+        'page tab', 'tool bar button'
+    ]
+
+    def __init__(self):
+        self.chrome_app = self._find_chrome()
+        if not self.chrome_app:
+            print("Error: Chrome not found in accessibility tree")
+            print("Make sure Chrome is running with --force-renderer-accessibility")
+            sys.exit(1)
+
+    def _find_chrome(self):
+        """Find Chrome application in the accessibility tree."""
+        desktop = Atspi.get_desktop(0)
+        for i in range(desktop.get_child_count()):
+            app = desktop.get_child_at_index(i)
+            if app:
+                name = (app.get_name() or "").lower()
+                if "chrome" in name or "chromium" in name:
+                    return app
+        return None
+
+    def _find_elements(self, obj, name_filter=None, role_filter=None,
+                       results=None, depth=0, max_depth=30):
+        """Recursively find elements matching criteria."""
+        if results is None:
+            results = []
+
+        if obj is None or depth > max_depth:
+            return results
+
+        try:
+            role = obj.get_role_name()
+            name = obj.get_name() or ""
+            description = obj.get_description() or ""
+
+            # Check if matches filter
+            match = True
+            if name_filter:
+                search_text = name_filter.lower()
+                if (search_text not in name.lower() and
+                    search_text not in description.lower()):
+                    match = False
+            if role_filter and role_filter.lower() != role.lower():
+                match = False
+
+            if match and name:  # Only include named elements
+                results.append({
+                    'obj': obj,
+                    'name': name,
+                    'role': role,
+                    'description': description,
+                    'depth': depth
+                })
+
+            # Recurse into children
+            for i in range(obj.get_child_count()):
+                child = obj.get_child_at_index(i)
+                self._find_elements(child, name_filter, role_filter,
+                                   results, depth + 1, max_depth)
+
+        except Exception as e:
+            pass  # Skip inaccessible elements
+
+        return results
+
+    def _click_element(self, obj):
+        """Click an element using its action interface."""
+        try:
+            action = obj.get_action_iface()
+            if action and action.get_n_actions() > 0:
+                # Try common action names
+                for i in range(action.get_n_actions()):
+                    action_name = action.get_action_name(i)
+                    if action_name in ['click', 'activate', 'press', 'jump', '']:
+                        action.do_action(i)
+                        return True
+                # Fallback: try first action
+                action.do_action(0)
+                return True
+        except Exception as e:
+            print(f"Error clicking: {e}")
+        return False
+
+    def click(self, name, role=None):
+        """Find and click an element by name."""
+        elements = self._find_elements(self.chrome_app, name_filter=name,
+                                        role_filter=role)
+
+        # Prefer clickable roles
+        clickable = [e for e in elements if e['role'] in self.CLICKABLE_ROLES]
+        if clickable:
+            elements = clickable
+
+        if not elements:
+            print(f"No element found matching '{name}'")
+            return False
+
+        # Click the first (or best) match
+        elem = elements[0]
+        print(f"Clicking: [{elem['role']}] {elem['name']}")
+
+        if self._click_element(elem['obj']):
+            print("✓ Clicked successfully")
+            return True
+        else:
+            print("✗ Click failed")
+            return False
+
+    def list_elements(self, filter_text=None, clickable_only=True):
+        """List elements in Chrome."""
+        elements = self._find_elements(self.chrome_app, name_filter=filter_text)
+
+        if clickable_only:
+            elements = [e for e in elements if e['role'] in self.CLICKABLE_ROLES]
+
+        if not elements:
+            print("No elements found")
+            return
+
+        # Deduplicate by name+role
+        seen = set()
+        unique = []
+        for elem in elements:
+            key = (elem['name'], elem['role'])
+            if key not in seen:
+                seen.add(key)
+                unique.append(elem)
+
+        # Print results
+        for elem in sorted(unique, key=lambda x: x['name'].lower()):
+            print(f"[{elem['role']:15}] {elem['name']}")
+
+    def focus(self, name):
+        """Focus an element by name."""
+        elements = self._find_elements(self.chrome_app, name_filter=name)
+
+        if not elements:
+            print(f"No element found matching '{name}'")
+            return False
+
+        elem = elements[0]
+        try:
+            component = elem['obj'].get_component_iface()
+            if component:
+                component.grab_focus()
+                print(f"Focused: [{elem['role']}] {elem['name']}")
+                return True
+        except Exception as e:
+            print(f"Error focusing: {e}")
+
+        return False
+
+    @staticmethod
+    def type_text(text):
+        """Type text using xdotool."""
+        subprocess.run(['xdotool', 'type', '--', text], check=True)
+        print(f"Typed: {text}")
+
+    @staticmethod
+    def send_key(key):
+        """Send key combination using xdotool."""
+        subprocess.run(['xdotool', 'key', key], check=True)
+        print(f"Sent key: {key}")
+
+    @staticmethod
+    def screenshot(filename=None):
+        """Take a screenshot."""
+        if not filename:
+            filename = f"/tmp/chrome_screenshot_{int(time.time())}.png"
+        subprocess.run(['scrot', filename], check=True)
+        print(f"Screenshot saved: {filename}")
+        return filename
+
+    def navigate(self, url):
+        """Navigate to a URL."""
+        # Ctrl+L to focus address bar, type URL, Enter
+        self.send_key('ctrl+l')
+        time.sleep(0.3)
+        self.type_text(url)
+        time.sleep(0.2)
+        self.send_key('Return')
+        print(f"Navigating to: {url}")
+
+    def switch_tab(self, tab_num):
+        """Switch to a specific tab (1-9)."""
+        if 1 <= tab_num <= 9:
+            self.send_key(f'ctrl+{tab_num}')
+            print(f"Switched to tab {tab_num}")
+        else:
+            print("Tab number must be 1-9")
+
+
+def print_usage():
+    """Print usage information."""
+    print(__doc__)
+
+
+def main():
+    if len(sys.argv) < 2:
+        print_usage()
+        sys.exit(1)
+
+    command = sys.argv[1].lower()
+    args = sys.argv[2:]
+
+    # Commands that don't need Chrome
+    if command == 'help':
+        print_usage()
+        return
+
+    # Initialize controller (finds Chrome)
+    controller = ChromeController()
+
+    if command == 'click':
+        if not args:
+            print("Usage: chrome-a11y click 'element name'")
+            sys.exit(1)
+        name = args[0]
+        role = args[1] if len(args) > 1 else None
+        controller.click(name, role)
+
+    elif command == 'list':
+        filter_text = args[0] if args else None
+        controller.list_elements(filter_text, clickable_only=True)
+
+    elif command == 'list-all':
+        filter_text = args[0] if args else None
+        controller.list_elements(filter_text, clickable_only=False)
+
+    elif command == 'type':
+        if not args:
+            print("Usage: chrome-a11y type 'text to type'")
+            sys.exit(1)
+        controller.type_text(args[0])
+
+    elif command == 'key':
+        if not args:
+            print("Usage: chrome-a11y key 'ctrl+l'")
+            sys.exit(1)
+        controller.send_key(args[0])
+
+    elif command == 'focus':
+        if not args:
+            print("Usage: chrome-a11y focus 'element name'")
+            sys.exit(1)
+        controller.focus(args[0])
+
+    elif command == 'screenshot':
+        filename = args[0] if args else None
+        controller.screenshot(filename)
+
+    elif command == 'navigate':
+        if not args:
+            print("Usage: chrome-a11y navigate 'https://example.com'")
+            sys.exit(1)
+        controller.navigate(args[0])
+
+    elif command == 'tab':
+        if not args:
+            print("Usage: chrome-a11y tab [1-9]")
+            sys.exit(1)
+        controller.switch_tab(int(args[0]))
+
+    else:
+        print(f"Unknown command: {command}")
+        print_usage()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
