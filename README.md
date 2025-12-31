@@ -12,6 +12,52 @@ Skills are reusable instructions that teach Claude how to perform specific tasks
 
 ## Available Skills
 
+### meeting-recorder
+
+Join Google Meet calls with real-time transcription using local speech-to-text.
+
+**Use case:** Have Claude join video meetings, transcribe conversations, and respond via chat. Perfect for meeting notes, accessibility, or AI-assisted collaboration.
+
+**Features:**
+- Join Google Meet as a participant
+- Real-time audio transcription via [Speaches](https://github.com/speaches-ai/speaches) (local, self-hosted)
+- Keyword detection for mentions and questions
+- Send messages to meeting chat
+- All audio processing happens locally - no cloud dependency
+
+#### Installation
+
+```bash
+# Requires chrome-automation skill to be installed first
+
+# Run setup
+sudo ./meeting-recorder/scripts/meeting-recorder-setup/setup.sh
+
+# Copy to Claude skills
+cp -r meeting-recorder ~/.claude/skills/
+```
+
+#### Usage
+
+```bash
+# Join a meeting
+meeting-recorder join "https://meet.google.com/xxx-yyyy-zzz"
+
+# Read live transcript
+tail -f /tmp/meetings/current/transcript.txt
+
+# Send a chat message
+meeting-recorder chat "Hello from Claude!"
+
+# Check status
+meeting-recorder status
+
+# Leave meeting
+meeting-recorder leave
+```
+
+---
+
 ### chrome-automation
 
 Launch and control Chrome in a headless Linux environment using AT-SPI2 accessibility APIs.
